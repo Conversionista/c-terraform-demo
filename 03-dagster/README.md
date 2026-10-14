@@ -47,20 +47,53 @@ flowchart TB
 
 **Why doesn't Terraform install Dagster too?** It could, using the Helm or Kubernetes providers, but the cluster's control plane is **private**. Terraform running in CI would need a network path into the cluster and Kubernetes admin rights. The team chose to keep Terraform at the GCP level and install the in-cluster software with Helm from a bastion VM, a small admin machine inside the network. Terraform creates that bastion too.
 
+### The components Terraform builds
+
+1. **Network:** a private VPC, Cloud NAT for outbound internet access, and a private connection to Cloud SQL.
+2. **Kubernetes cluster:** a private GKE cluster with two node pools: an always-on pool for Dagster itself, and a spot pool that scales from zero for pipeline runs.
+3. **Database:** Cloud SQL Postgres, where Dagster stores run history, event logs and schedule state.
+4. **Storage:** GCS buckets for Dagster's compute logs, dlt staging and BigQuery backups.
+5. **Image registry:** Artifact Registry, which holds the Docker image with the pipeline code.
+6. **Identity and access:**
+   - service accounts for Dagster's control plane and its run pods
+   - the IAM roles for those accounts
+   - Workload Identity bindings that let pods act as those accounts
+   - the GitHub OIDC pool for CI
+   - project IAM for user groups
+7. **Secrets:** the Secret Manager *containers* for API keys and the database password. The values are added outside Terraform.
+8. **BigQuery:** datasets, access grants, scheduled transfers and an audit-log sink.
+
+Supporting pieces: a static IP and Identity-Aware Proxy (IAP) for the Dagster UI, a bastion VM for admin access, and a monitoring alert for when the Dagster stack goes missing.
+
+**Not built by Terraform:** anything *inside* the cluster (Dagster, External Secrets Operator, GitHub Actions runners, the Ingress), DNS records, secret values, and the pipeline code.
+
 ## 2. What runs where
+
+Colours show **who manages each component**:
+
+| Colour | Managed by |
+|---|---|
+| 🟩 Green | **Terraform** (`terraform/`) |
+| 🟦 Blue | **Helm / kubectl**, installed into the cluster (`k8s/`) |
+| 🟧 Orange | **GitHub Actions** (image build and code deploys) |
+| ⬜ Grey, dashed | **Dagster at runtime** (created and removed per run) |
+| 🟪 Purple | **By hand**, outside any tool (DNS record, secret values) |
 
 ```mermaid
 flowchart LR
     users(["Developers<br/>(browser)"])
     sources(["Source APIs<br/>Harvest, Float, Visma, ..."])
+    dns["DNS record<br/>for the Dagster UI"]
 
     subgraph gcp["GCP project (one per environment: dev / prod)"]
-        iap["HTTPS load balancer<br/>+ Identity-Aware Proxy"]
+        ip["Static IP<br/>+ IAP enabled"]
+        lb["Ingress: HTTPS load balancer<br/>+ TLS certificate"]
 
-        subgraph vpc["orchestration-vpc"]
+        subgraph vpc["VPC: orchestration-vpc"]
             nat["Cloud NAT<br/>(outbound internet)"]
+            bastion["Bastion VM<br/>(admin access)"]
 
-            subgraph gke["GKE cluster dagster-env (private)"]
+            subgraph gke["GKE cluster: dagster-env (private)"]
                 subgraph pool1["Node pool: default (always on)"]
                     web["Dagster webserver<br/>(UI)"]
                     daemon["Dagster daemon<br/>(schedules, sensors, queue)"]
@@ -76,21 +109,52 @@ flowchart LR
             sql[("Cloud SQL Postgres<br/>runs, events, schedules")]
         end
 
+        sa["Service accounts + IAM<br/>+ Workload Identity"]
         logs[("GCS bucket<br/>compute logs")]
-        ar[("Artifact Registry<br/>dagster image")]
-        sm[("Secret Manager<br/>API keys, DB password")]
-        bq[("BigQuery<br/>raw → stg → dom → prs")]
+        ar[("Artifact Registry")]
+        img["dagster image<br/>(dlt + dbt code)"]
+        sm[("Secret Manager<br/>secret containers")]
+        vals["Secret values"]
+        bq[("BigQuery datasets<br/>+ access grants")]
+        mon["Monitoring alert"]
     end
 
-    users --> iap --> web
+    users --> dns --> ip --> lb --> web
+    bastion -.->|helm upgrade| gke
     daemon -->|launches| run
     web & daemon & cl_dlt & cl_dbt --> sql
     run --> logs
-    ar -.->|image pulled by| run
+    ar --- img
+    img -.->|pulled by| run
+    vals -.-> sm
     sm -.->|synced by| eso
+    sa -.->|identity for| run
     run -->|via NAT| nat --> sources
     run -->|load + transform| bq
+
+    classDef tf fill:#c8e6c9,stroke:#2e7d32,color:#1b1b1b
+    classDef helm fill:#bbdefb,stroke:#1565c0,color:#1b1b1b
+    classDef ci fill:#ffe0b2,stroke:#e65100,color:#1b1b1b
+    classDef runtime fill:#eeeeee,stroke:#757575,color:#1b1b1b,stroke-dasharray:5 5
+    classDef manual fill:#e1bee7,stroke:#6a1b9a,color:#1b1b1b
+    classDef external fill:#ffffff,stroke:#9e9e9e,color:#1b1b1b
+
+    class ip,nat,bastion,sql,sa,logs,ar,sm,bq,mon tf
+    class lb,web,daemon,eso helm
+    class cl_dlt,cl_dbt,img ci
+    class run runtime
+    class dns,vals manual
+    class users,sources external
+
+    style vpc fill:#e8f5e9,stroke:#2e7d32,color:#1b1b1b
+    style gke fill:#e8f5e9,stroke:#2e7d32,color:#1b1b1b
+    style pool1 fill:#f1f8e9,stroke:#2e7d32,color:#1b1b1b
+    style pool2 fill:#f1f8e9,stroke:#2e7d32,color:#1b1b1b
 ```
+
+The **VPC, the cluster and both node pools** (green boxes) are Terraform. The **things running inside them** are installed by Helm or deployed by CI.
+
+The code-location servers are created by the Helm chart, but CI swaps the image they run on every code deploy, so they're marked orange.
 
 **Notes:**
 
