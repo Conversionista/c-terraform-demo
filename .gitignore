@@ -1,2 +1,5 @@
 .terraform/
 out/
+*.tfstate
+*.tfstate.*
+tfplan
