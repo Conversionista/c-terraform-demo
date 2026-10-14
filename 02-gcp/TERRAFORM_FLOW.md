@@ -70,7 +70,7 @@ flowchart TD
     A["bootstrap/<br/>no backend block"] -->|terraform init + apply| B[("GCS state bucket")]
     A -->|its own state| C["bootstrap/terraform.tfstate<br/>(on your laptop)"]
 
-    D["bigquery/<br/>backend &quot;gcs&quot; block"] -->|terraform init| E{"Bucket<br/>exists?"}
+    D["bigquery/<br/>gcs backend block"] -->|terraform init| E{"Bucket<br/>exists?"}
     E -->|no| F["init fails:<br/>run bootstrap first"]
     E -->|yes| G["Backend configured<br/>.terraform/terraform.tfstate points to the bucket"]
     G -->|terraform apply| H["gs://.../02-gcp/bigquery/default.tfstate"]
