@@ -7,7 +7,7 @@ terraform {
   }
 }
 
-resource "local_file" "person_config" {
-    filename = "${path.module}/out/hello.txt"
-    content  = "hello again from terraform\n"
+resource "local_file" "hello_text" {
+  filename = "${path.module}/out/hello.txt"
+  content  = "hello from terraform\n"
 }
